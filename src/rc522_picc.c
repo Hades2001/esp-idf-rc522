@@ -299,12 +299,14 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
     uint8_t index;
     uint8_t uid_index;               // The first index in uid->uidByte[] that is used in the current Cascade Level.
     int8_t current_level_known_bits; // The number of known UID bits in the current Cascade Level.
-    uint8_t buffer[9];               // The SELECT/ANTICOLLISION commands uses a 7 byte standard frame + 2 bytes CRC_A
+    uint8_t buffer[16];               // The SELECT/ANTICOLLISION commands uses a 7 byte standard frame + 2 bytes CRC_A
     uint8_t buffer_used;  // The number of bytes used in the buffer, ie the number of bytes to transfer to the FIFO.
     uint8_t rx_align;     // Used in BitFramingReg. Defines the bit position for the first bit received.
     uint8_t tx_last_bits; // Used in BitFramingReg. The number of valid bits in the last transmitted byte.
     uint8_t *response_buffer;
     uint8_t response_length;
+    bool isNTAGCard;
+    uint8_t ntag_flag_buff[8];
 
     rc522_picc_uid_t uid;
 
@@ -343,6 +345,12 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
 
     // Prepare MFRC522
     RC522_RETURN_ON_ERROR(rc522_pcd_clear_bits(rc522, RC522_PCD_COLL_REG, RC522_PCD_VALUES_AFTER_COLL_BIT));
+
+    isNTAGCard = (rc522->picc.atqa.source == 0x4400 ) ? true : false;
+    if(isNTAGCard){
+        RC522_LOGD("Card is NTAG card");
+        memset(ntag_flag_buff,0,sizeof(ntag_flag_buff)); //init ntag data&flag buff
+    }
 
     // Repeat Cascade Level loop until we have a complete UID.
     uid_complete = false;
@@ -414,19 +422,25 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
             current_level_known_bits += 8;
         }
 
+        uint8_t current_uid_num = 32;
+        if(rc522->picc.atqa.source == 0x4400 ){
+            current_uid_num = 56;
+        }
         // Repeat anti collision loop until we can transmit all UID bits + BCC and receive a SAK - max 32 iterations.
+
+        
         select_done = false;
         while (!select_done) {
             // Find out how many bits and bytes to send and receive.
-            if (current_level_known_bits >= 32) { // All UID bits in this Cascade Level are known. This is a SELECT.
+            if ( current_level_known_bits >= 32 ) { // All UID bits in this Cascade Level are known. This is a SELECT.
                 RC522_LOGD("SELECT (cl=%d)", cascade_level);
+                RC522_LOGD("known_bits (cl=%d)",current_level_known_bits);
 
                 // NVB - Number of Valid Bits: Seven whole bytes
                 buffer[1] = 0x70;
                 // Calculate BCC - Block Check Character
                 buffer[6] = buffer[2] ^ buffer[3] ^ buffer[4] ^ buffer[5];
                 // Calculate CRC_A
-
                 rc522_pcd_crc_t crc = { 0 };
                 RC522_RETURN_ON_ERROR(
                     rc522_pcd_calculate_crc(rc522, &(rc522_bytes_t) { .ptr = buffer, .length = 7 }, &crc));
@@ -439,6 +453,9 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
                 // Store response in the last 3 bytes of buffer (BCC and CRC_A - not needed after tx)
                 response_buffer = &buffer[6];
                 response_length = 3;
+                if(isNTAGCard) {
+                    ntag_flag_buff[0] |= 0x80;
+                }
             }
             else { // This is an ANTICOLLISION.
                 RC522_LOGD("ANTICOLLISION (cl=%d)", cascade_level);
@@ -451,6 +468,11 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
                 // Store response in the unused part of buffer
                 response_buffer = &buffer[index];
                 response_length = sizeof(buffer) - index;
+                if(isNTAGCard){
+                    ntag_flag_buff[0] &= 0x7f;
+                    buffer[0] = (ntag_flag_buff[0] == 0 ) ? RC522_PICC_CMD_SEL_CL1 : RC522_PICC_CMD_SEL_CL2;
+                    ntag_flag_buff[0] ++;
+                }
             }
 
             // Set bit adjustments
@@ -458,8 +480,9 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
             rx_align = tx_last_bits;
 
             // RxAlign = BitFramingReg[6..4]. TxLastBits = BitFramingReg[2..0]
+            
             RC522_RETURN_ON_ERROR(rc522_pcd_write(rc522, RC522_PCD_BIT_FRAMING_REG, (rx_align << 4) + tx_last_bits));
-
+            
             // Transmit the buffer and receive the response.
             rc522_picc_transaction_t transaction = {
                 .bytes = { .ptr = buffer, .length = buffer_used },
@@ -470,14 +493,11 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
             rc522_picc_transaction_result_t transaction_result = {
                 .bytes = { .ptr = response_buffer, .length = response_length },
             };
-
             ret = rc522_picc_transceive(rc522, &transaction, &transaction_result);
-
             if (ret == ESP_OK) {
                 response_length = transaction_result.bytes.length;
                 tx_last_bits = transaction_result.valid_bits;
             }
-
             if (ret == RC522_ERR_COLLISION) { // More than one PICC in the field => collision.
                 RC522_LOGD("collision detected (cl=%d, skip_anticoll=%d)", cascade_level, skip_anticoll);
 
@@ -523,14 +543,41 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
                 return ret;
             }
             else {                                    // ESP_OK
-                if (current_level_known_bits >= 32) { // This was a SELECT.
-                    // No more anticollision
-                    // We continue below outside the while.
-                    select_done = true;
+                if (current_level_known_bits >= current_uid_num) { // This was a SELECT.
+                        // No more anticollision
+                        // We continue below outside the while.
+                        select_done = true;
                 }
                 else { // This was an ANTICOLLISION.
                     // We now have all 32 bits of the UID in this Cascade Level
-                    current_level_known_bits = 32;
+                    if(isNTAGCard){
+                        //ntag_flag_buff[0] = 1;
+                        // TODO: Copy ntag uid to buff ---> ntag_flag_buff transaction_result
+                        RC522_LOGW("ntag_flag_buff[0] (flag=%d)", ntag_flag_buff[0]);
+                        switch (ntag_flag_buff[0])
+                        {
+                        case 0x01: 
+                            current_level_known_bits = 32; 
+                            RC522_LOGD("transaction_result (len=%d)", transaction_result.bytes.length);
+                            memcpy(&ntag_flag_buff[1],&transaction_result.bytes.ptr[1],3);
+                            //
+                            break;
+                        case 0x02: 
+                            current_level_known_bits = 56; 
+                            RC522_LOGD("transaction_result (len=%d)", transaction_result.bytes.length);
+                            memcpy(&ntag_flag_buff[4],&transaction_result.bytes.ptr[0],4);
+                            break;
+                        case 0x81: current_level_known_bits = 0; break;
+                        case 0x82: current_level_known_bits = 56;break;
+                        default:
+                            current_level_known_bits = 0; 
+                            break;
+                        }
+                    }
+                    else{
+                        current_level_known_bits = 32;
+                    }
+                    
                     // Run loop again to do the SELECT.
                 }
             }
@@ -541,11 +588,18 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
         // We do not check the CBB - it was constructed by us above.
 
         // Copy the found UID bytes from buffer[] to uid.uidByte[]
-        index = (buffer[2] == RC522_PICC_CMD_CT) ? 3 : 2; // source index in buffer[]
-        bytes_to_copy = (buffer[2] == RC522_PICC_CMD_CT) ? 3 : 4;
-        for (count = 0; count < bytes_to_copy; count++) {
-            uid.value[uid_index + count] = buffer[index++];
+        if(isNTAGCard){
+            esp_log_buffer_hex("rc522 NTAG UID",ntag_flag_buff,8);
+            memcpy(&uid.value[0],&ntag_flag_buff[1],7);
         }
+        else{
+            index = (buffer[2] == RC522_PICC_CMD_CT) ? 3 : 2; // source index in buffer[]
+            bytes_to_copy = (buffer[2] == RC522_PICC_CMD_CT) ? 3 : 4;
+            for (count = 0; count < bytes_to_copy; count++) {
+                uid.value[uid_index + count] = buffer[index++];
+            }
+        }
+
 
         // Check response SAK (Select Acknowledge)
         if (response_length != 3 || tx_last_bits != 0) { // SAK must be exactly 24 bits (1 byte + CRC_A).
@@ -581,7 +635,13 @@ esp_err_t rc522_picc_select(const rc522_handle_t rc522, rc522_picc_uid_t *out_ui
     } // End of while (!uidComplete)
 
     // Set correct uid.size
-    uid.length = 3 * cascade_level + 1;
+    if(isNTAGCard){
+        uid.length = 7;
+    }
+    else{
+        uid.length = 3 * cascade_level + 1;
+    }
+    
 
     RC522_LOGD("sak=0x%02" RC522_X, sak);
 
