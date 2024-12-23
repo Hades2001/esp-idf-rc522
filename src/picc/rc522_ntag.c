@@ -85,7 +85,7 @@ esp_err_t rc522_ntag_readn(const rc522_handle_t rc522, const rc522_picc_t *picc,
         len -= 4;
         page++;
         cpy_num = (len < 0 ) ? (4 - offset + len):(4-offset);
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG,&read_buff[offset],4,ESP_LOG_INFO);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG,&read_buff[offset],4,ESP_LOG_DEBUG);
         memcpy((out_buffer + write_offset),&read_buff[offset],4-offset);
         offset = (offset != 0 ) ? 0 : offset;
         write_offset += cpy_num;
@@ -95,12 +95,6 @@ esp_err_t rc522_ntag_readn(const rc522_handle_t rc522, const rc522_picc_t *picc,
     return ESP_OK; 
 }
 
-
-typedef struct ntag_tvl_info{
-    uint8_t type;
-    int blocklen;
-    int start_addr;
-}ntag_tvl_info_t;
 
 esp_err_t ntag_get_tlv_info(const rc522_handle_t rc522, const rc522_picc_t *picc, ntag_tvl_info_t* tvl_info)
 {
@@ -123,33 +117,6 @@ esp_err_t ntag_get_tlv_info(const rc522_handle_t rc522, const rc522_picc_t *picc
     ESP_LOGI(TAG,"TVL Info length:%d,start addr:%d",tvl_info->blocklen,tvl_info->start_addr);
     return ESP_OK;
 }
-
-// Define the union for an NDEF record header
-typedef union NDEFHeader {
-    uint8_t byte;
-    struct {
-        uint8_t TNF : 3; // Type Name Format
-        uint8_t IL : 1;  // ID Length Present
-        uint8_t SR : 1;  // Short Record
-        uint8_t CF : 1;  // Chunk Flag
-        uint8_t ME : 1;  // Message End
-        uint8_t MB : 1;  // Message Begin
-    } bits;
-} NDEFHeader;
-
-// Define the structure for a linked list node representing an NDEF record
-typedef struct ndef_record {
-    NDEFHeader header;       // NDEF record header
-    uint32_t payload_length; // Length of the payload
-    uint8_t type_length;     // Length of the type field
-    uint8_t id_length;       // Length of the ID field (if present)
-    uint8_t lang_code_length; // Length of the language code (if present)
-    uint8_t *lang_code;      // Pointer to the language code field
-    uint8_t *type;           // Pointer to the type field
-    uint8_t *id;             // Pointer to the ID field (if present)
-    uint8_t *payload;        // Pointer to the payload data
-    struct ndef_record *next; // Pointer to the next NDEF record
-} ndef_record;
 
 // Function to parse the NDEF header from a byte
 NDEFHeader parse_header(uint8_t byte) {
@@ -285,29 +252,35 @@ void free_ndef_records(ndef_record *head) {
         current = next;
     }
 }
-esp_err_t ntag_read_ndef(const rc522_handle_t rc522, const rc522_picc_t *picc)
-{
+
+/**
+ * @brief Reads and parses NDEF records from an NTAG card.
+ *
+ * @param rc522 Handle to the RC522 device.
+ * @param picc Pointer to the PICC (Proximity Integrated Circuit Card) structure.
+ * @param dataptr Pointer to a buffer that will store the raw NDEF data. Must be freed by the caller after use.
+ * @param records Pointer to the parsed linked list of NDEF records. Must be freed by the caller using `free_ndef_records` after use.
+ *
+ * @return ESP_OK on success, or an error code indicating the type of failure.
+ */
+esp_err_t ntag_read_ndef(const rc522_handle_t rc522, const rc522_picc_t *picc, uint8_t **dataptr, ndef_record **records) {
     ntag_tvl_info_t ntag_tvl_info;
-    ntag_get_tlv_info(rc522,picc,&ntag_tvl_info);
-    if(ntag_tvl_info.blocklen <= 0 ){
+    ntag_get_tlv_info(rc522, picc, &ntag_tvl_info);
+
+    if (ntag_tvl_info.blocklen <= 0) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    uint8_t *dataptr = (uint8_t*)malloc(ntag_tvl_info.blocklen);
-    if(dataptr==NULL){
+    *dataptr = (uint8_t *)malloc(ntag_tvl_info.blocklen);
+    if (*dataptr == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    rc522_ntag_readn(rc522,picc,ntag_tvl_info.start_addr,dataptr,ntag_tvl_info.blocklen);
 
-    ndef_record *records = parse_ndef_records(dataptr, ntag_tvl_info.blocklen);
+    ESP_RETURN_ON_ERROR(rc522_ntag_readn(rc522, picc, ntag_tvl_info.start_addr, *dataptr, ntag_tvl_info.blocklen), TAG, "Read NTAG failed");
 
-    // Print the parsed records
-    print_ndef_records(records);
+    *records = parse_ndef_records(*dataptr, ntag_tvl_info.blocklen);
 
-    // Free the linked list
-    free_ndef_records(records);
-
-    free(dataptr);
+    print_ndef_records(*records);
 
     return ESP_OK;
 }
