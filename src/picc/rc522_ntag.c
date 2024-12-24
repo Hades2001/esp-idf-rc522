@@ -6,8 +6,6 @@
 #include "rc522_picc_internal.h"
 #include "picc/rc522_ntag.h"
 
-
-
 #define TAG "NTAG"
 
 enum
@@ -95,6 +93,9 @@ esp_err_t rc522_ntag_readn(const rc522_handle_t rc522, const rc522_picc_t *picc,
     return ESP_OK; 
 }
 
+#define TAG_TLV_NDEF 0x03  // NDEF Message TLV Tag
+#define TAG_TLV_TERMINATOR 0xFE  // Terminator TLV Tag
+#define NTAG_TVL_FIND_SIZE   (4)
 
 esp_err_t ntag_get_tlv_info(const rc522_handle_t rc522, const rc522_picc_t *picc, ntag_tvl_info_t* tvl_info)
 {
@@ -102,20 +103,35 @@ esp_err_t ntag_get_tlv_info(const rc522_handle_t rc522, const rc522_picc_t *picc
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint8_t tvl_buff[NTAG_PAGE_SIZE];
-    ESP_RETURN_ON_ERROR(rc522_ntag_read(rc522,picc,4,tvl_buff),TAG,"NTAG read fault");
-   
-    tvl_info->type = tvl_buff[0];
-    if(tvl_buff[1] != 0xff){
-        tvl_info->blocklen = tvl_buff[1];
-        tvl_info->start_addr = 4*4+2;
-    } else
-    {
-        tvl_info->blocklen = ((int)tvl_buff[2] << 8) + tvl_buff[3];
-        tvl_info->start_addr = 5*4;
+    int offset = 0;
+    uint8_t tvl_buff[NTAG_TVL_FIND_SIZE];
+    ntag_tvl_info_t tvl;
+    while(1){
+        ESP_RETURN_ON_ERROR(rc522_ntag_readn(rc522, picc, 16+offset, tvl_buff, NTAG_TVL_FIND_SIZE), TAG, "Read NTAG failed");
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG,tvl_buff,NTAG_TVL_FIND_SIZE,ESP_LOG_INFO);
+        if(tvl_buff[1] != 0xff){
+            tvl.blocklen = tvl_buff[1];
+            offset += 2;
+        } else
+        {
+            tvl.blocklen = ((int)tvl_buff[2] << 8) + tvl_buff[3];
+            offset += 4;
+        }
+        if(tvl_buff[0] == TAG_TLV_NDEF){
+            tvl_info->blocklen = tvl.blocklen;
+            tvl_info->start_addr = 16 + offset;
+            ESP_LOGI(TAG,"TVL is fount,Type:%02x,length:%d,start addr:%d",tvl_buff[0],tvl_info->blocklen,tvl_info->start_addr);
+            return ESP_OK;
+        }
+        else{
+            offset += tvl.blocklen;
+            tvl_info->blocklen = tvl.blocklen;
+            tvl_info->start_addr = 16 + offset;
+            ESP_LOGI(TAG,"TVL is fount,Type:%02x,length:%d,start addr:%d",tvl_buff[0],tvl_info->blocklen,tvl_info->start_addr);
+        }
     }
-    ESP_LOGI(TAG,"TVL Info length:%d,start addr:%d",tvl_info->blocklen,tvl_info->start_addr);
-    return ESP_OK;
+    return ESP_ERR_NOT_FOUND;
+
 }
 
 // Function to parse the NDEF header from a byte

@@ -47,7 +47,6 @@ typedef struct ndef_record {
 esp_err_t rc522_ntag_read(const rc522_handle_t rc522, const rc522_picc_t *picc, uint8_t block_address,uint8_t out_buffer[NTAG_PAGE_SIZE]);
 esp_err_t rc522_ntag_readn(const rc522_handle_t rc522, const rc522_picc_t *picc, uint16_t address,uint8_t* out_buffer,int len);
 
-
 NDEFHeader parse_header(uint8_t byte);
 ndef_record *create_ndef_record(NDEFHeader header, uint32_t payload_length, uint8_t type_length, uint8_t id_length, uint8_t lang_code_length, uint8_t *lang_code, uint8_t *type, uint8_t *id, uint8_t *payload);
 ndef_record *parse_ndef_records(uint8_t *data, size_t length);
