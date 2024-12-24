@@ -63,39 +63,41 @@ esp_err_t rc522_ntag_read(const rc522_handle_t rc522, const rc522_picc_t *picc, 
     return ESP_OK;
 }
 
-esp_err_t rc522_ntag_readn(const rc522_handle_t rc522, const rc522_picc_t *picc, uint16_t address,uint8_t* out_buffer,int len)
-{
-    if((out_buffer == NULL) ||(len <= 0)){
-        return ESP_ERR_INVALID_ARG;
+// Function to read NTAG across multiple pages
+esp_err_t rc522_ntag_readn(const rc522_handle_t rc522, const rc522_picc_t *picc, uint16_t address, uint8_t *out_buffer, int len) {
+    int bytes_read = 0;
+
+    while (bytes_read < len) {
+        uint8_t read_buffer[NTAG_PAGE_SIZE];
+
+        // Convert byte address to page address
+        uint8_t page_address = address / NTAG_PAGE_SIZE;
+        int page_offset = address % NTAG_PAGE_SIZE;
+
+        // Read the current page
+        esp_err_t err = rc522_ntag_read(rc522, picc, page_address, read_buffer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to read page at address %d", page_address);
+            return err;
+        }
+
+        // Calculate the number of bytes to copy from the current page
+        int remaining_bytes = len - bytes_read;
+        int bytes_to_copy = (remaining_bytes > (NTAG_PAGE_SIZE - page_offset)) ? (NTAG_PAGE_SIZE - page_offset) : remaining_bytes;
+
+        // Copy the required data into the output buffer
+        memcpy(out_buffer + bytes_read, read_buffer + page_offset, bytes_to_copy);
+        bytes_read += bytes_to_copy;
+
+        // Move to the next page
+        address += bytes_to_copy;
     }
 
-    uint8_t read_buff[NTAG_PAGE_SIZE];
-    uint16_t offset,write_offset = 0;
-    uint8_t page,cpy_num;
-    int buff_len = len;
-
-    page = address / 4;
-    offset = address % 4;
-    len += offset;
-
-    while(len > 0){
-        rc522_ntag_read(rc522,picc,page,read_buff);
-        len -= 4;
-        page++;
-        cpy_num = (len < 0 ) ? (4 - offset + len):(4-offset);
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG,&read_buff[offset],4,ESP_LOG_DEBUG);
-        memcpy((out_buffer + write_offset),&read_buff[offset],4-offset);
-        offset = (offset != 0 ) ? 0 : offset;
-        write_offset += cpy_num;
-        ESP_LOGD(TAG,"len:%d,page:%d,cpy_num:%d,offset:%d",len,page,cpy_num,offset);
-    }
-
-    return ESP_OK; 
+    return ESP_OK;
 }
 
 #define TAG_TLV_NDEF 0x03  // NDEF Message TLV Tag
 #define TAG_TLV_TERMINATOR 0xFE  // Terminator TLV Tag
-#define NTAG_TVL_FIND_SIZE   (4)
 
 esp_err_t ntag_get_tlv_info(const rc522_handle_t rc522, const rc522_picc_t *picc, ntag_tvl_info_t* tvl_info)
 {

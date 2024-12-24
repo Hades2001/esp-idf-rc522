@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 #define NTAG_PAGE_SIZE  (4)
+#define NTAG_TVL_FIND_SIZE   (4)
 #define NTAG_PAGE_READ_SIZE (16)
 
 typedef struct ntag_tvl_info{
